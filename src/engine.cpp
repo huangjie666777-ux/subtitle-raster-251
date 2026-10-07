@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "subtitle_raster251/subtitle_raster251.h"
+#include "engine_internal.h"
 #include "segments.h"
 #include "utf8.h"
 
@@ -22,18 +23,16 @@ const char* ErrorMessage(Error error) {
     case Error::kBadFont: return "cannot load font";
     case Error::kBadFontSize: return "font size must be positive and finite";
     case Error::kBadSelection: return "invalid selection range";
+    case Error::kBadStyle: return "invalid raster style";
+    case Error::kImageTooLarge: return "rasterized image exceeds 4,000,000 pixels";
+    case Error::kNoInk: return "line has no visible pixels";
+    case Error::kFileIo: return "cannot write PNG file";
   }
   return "unknown error";
 }
 
-struct Engine::Impl {
-  hb_blob_t* blob = nullptr;
-  hb_face_t* face = nullptr;
-  hb_font_t* font = nullptr;
-  Error error = Error::kOk;
-};
-
 Engine::Engine(const std::string& font_path) : impl_(new Impl) {
+  impl_->font_path = font_path;
   impl_->blob = hb_blob_create_from_file(font_path.c_str());
   if (!impl_->blob || hb_blob_get_length(impl_->blob) == 0) {
     impl_->error = Error::kBadFont;
@@ -48,9 +47,22 @@ Engine::Engine(const std::string& font_path) : impl_(new Impl) {
   }
   impl_->font = hb_font_create(impl_->face);
   hb_ot_font_set_funcs(impl_->font);
+
+  if (FT_Init_FreeType(&impl_->ft_library) == 0) {
+    if (FT_New_Memory_Face(impl_->ft_library,
+                           reinterpret_cast<const FT_Byte*>
+                               (hb_blob_get_data(impl_->blob, nullptr)),
+                           static_cast<FT_Long>(hb_blob_get_length(
+                               impl_->blob)),
+                           0, &impl_->ft_face) != 0) {
+      impl_->ft_face = nullptr;
+    }
+  }
 }
 
 Engine::~Engine() {
+  if (impl_->ft_face) FT_Done_Face(impl_->ft_face);
+  if (impl_->ft_library) FT_Done_FreeType(impl_->ft_library);
   if (impl_->font) hb_font_destroy(impl_->font);
   if (impl_->face) hb_face_destroy(impl_->face);
   if (impl_->blob) hb_blob_destroy(impl_->blob);

@@ -24,6 +24,10 @@ enum class Error {
   kBadFontSize,    // Font size is not a positive finite number.
   kBadSelection,   // Selection range is inverted, out of bounds, or
                    // does not fall on code point boundaries.
+  kBadStyle,       // Style parameter is out of range.
+  kImageTooLarge,  // Rasterized canvas would exceed 4,000,000 pixels.
+  kNoInk,          // Line has no visible pixels; nothing was rendered.
+  kFileIo,         // PNG file could not be written.
 };
 
 const char* ErrorMessage(Error error);
@@ -62,6 +66,39 @@ struct SelectionRange {
   double x1 = 0.0;
 };
 
+// 8-bit straight (non-premultiplied) RGBA color.
+struct Rgba {
+  uint8_t r = 0;
+  uint8_t g = 0;
+  uint8_t b = 0;
+  uint8_t a = 255;
+};
+
+struct RasterStyle {
+  Rgba fill = {255, 255, 255, 255};
+  Rgba stroke = {0, 0, 0, 255};
+  // Outline radius in finite pixels, 0..8. 0 disables the outline.
+  double stroke_radius = 0.0;
+  // Integer padding added on every side of the ink bounding box,
+  // 0..32 pixels.
+  int padding = 0;
+};
+
+struct RasterImage {
+  // Top-to-bottom, left-to-right straight RGBA8. Fully transparent
+  // pixels always have r=g=b=0. Empty for a no-ink line.
+  std::vector<uint8_t> pixels;
+  int width = 0;
+  int height = 0;
+  // Original line width returned unchanged from Layout::width.
+  double line_width = 0.0;
+  // Canvas top-left corner relative to the line baseline origin used
+  // by Layout: x grows right, y grows down. Both are <= 0 (the canvas
+  // starts at or above/left of the baseline origin).
+  int origin_x = 0;
+  int origin_y = 0;
+};
+
 class Engine {
  public:
   // Loads the font file. Check GetError() after construction.
@@ -85,6 +122,19 @@ class Engine {
   Error SelectionRanges(const Layout& layout, size_t byte_begin,
                         size_t byte_end,
                         std::vector<SelectionRange>* out) const;
+
+  // Rasterizes an already shaped single line. The glyph ids and
+  // positions from LayoutLine are reused; the text is not re-shaped.
+  // font_size must equal the size used for shaping (8..128 pixels).
+  // On success the image is written through out. A line with no ink
+  // (empty/whitespace-only text or zero-alpha colors) returns
+  // kNoInk with out reset to a 0x0 image carrying the line width.
+  Error RasterizeLine(const Layout& layout, double font_size,
+                      const RasterStyle& style, RasterImage* out) const;
+
+  // Writes the pixels of a RasterImage to a 8-bit RGBA PNG file,
+  // byte-identical to the in-memory content.
+  static Error SavePng(const RasterImage& image, const std::string& path);
 
  private:
   struct Impl;

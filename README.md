@@ -1,12 +1,13 @@
 # subtitle_raster251
 
-C++17 library for laying out a single line of mixed Arabic / Hebrew /
-Latin text for subtitle rendering, and for mapping logical text
-selections to visual on-screen intervals.
+C++17 library for laying out and rasterizing a single line of mixed
+Arabic / Hebrew / Latin text for subtitle rendering, and for mapping
+logical text selections to visual on-screen intervals.
 
-Built on FriBidi 1.0.8 (bidi analysis) and HarfBuzz 2.7.4 (shaping),
-both vendored under `third_party/`. The font is
-`fonts/DejaVuSans.ttf`.
+Built on FriBidi 1.0.8 (bidi analysis), HarfBuzz 2.7.4 (shaping),
+FreeType 2.11.1 (grayscale glyph rasterization and rounded outlines),
+and libpng 1.6.37 (PNG output), all vendored under `third_party/`.
+The font is `fonts/DejaVuSans.ttf`.
 
 ## Features
 
@@ -34,6 +35,27 @@ both vendored under `third_party/`. The font is
   several disjoint ranges. Out-of-range, inverted, or
   non-code-point-boundary selections are rejected; empty selections
   return empty.
+- Single-line rasterization to a transparent overlay image:
+  - Reuses the glyph ids and positions produced by `LayoutLine`; text
+    is never shaped or positioned again, so joins, ligatures, and
+    combining-mark placement are identical to the layout.
+  - FreeType grayscale antialiasing honors negative bearings, subpixel
+    pen positions, and the y-up/y-down flip. Rounded outer outlines use
+    the FreeType stroker (radius 0..8 finite pixels).
+  - The fill and the outline are each merged across the whole line with
+    maximum coverage first, then composited source-over outline-first,
+    fill-second, so overlapping glyphs never double-darken and an
+    outline never covers an adjacent glyph's fill.
+  - Output is top-to-bottom straight (non-premultiplied) RGBA8; fully
+    transparent pixels have RGB 0. The canvas is the tight bitmap
+    bounding box (marks and outlines included) plus integer padding
+    (0..32). Up to 4,000,000 pixels; larger canvases are rejected with
+    `kImageTooLarge`. No-ink lines (empty/whitespace text or zero-alpha
+    colors) return a 0x0 image carrying the original line width and no
+    file is written.
+  - Font sizes are 8..128 pixels. Fill and outline take 8-bit RGBA
+    colors.
+- PNG saving writes the in-memory pixels byte-for-byte as 8-bit RGBA.
 
 ## Public API
 
@@ -46,6 +68,20 @@ engine.LayoutLine("mixed text", 24.0,
                   subtitle_raster251::BaseDirection::kAuto, &layout);
 std::vector<subtitle_raster251::SelectionRange> ranges;
 engine.SelectionRanges(layout, 4, 12, &ranges);
+
+subtitle_raster251::RasterStyle style;
+style.fill   = {255, 255, 255, 255};  // white fill
+style.stroke = {0, 0, 0, 255};        // black outline
+style.stroke_radius = 2.0;            // px, 0 disables the outline
+style.padding = 8;                    // px on every side
+subtitle_raster251::RasterImage image;
+engine.RasterizeLine(layout, 24.0, style, &image);
+// image.pixels: straight RGBA8, rows top-to-bottom
+// image.width / image.height: canvas size in pixels
+// image.line_width: original layout width
+// image.origin_x / origin_y: canvas top-left relative to the baseline
+//   origin (x right, y down)
+subtitle_raster251::Engine::SavePng(image, "subtitle.png");
 ```
 
 ## Source layout
@@ -55,13 +91,16 @@ engine.SelectionRanges(layout, 4, 12, &ranges);
   segmentation, visual reordering.
 - `src/engine.cpp` — HarfBuzz shaping and glyph positioning.
 - `src/selection.cpp` — logical-to-visual selection mapping.
+- `src/raster.cpp` — FreeType grayscale raster, rounded outline,
+  per-line coverage merge and source-over RGBA compositing.
+- `src/png_save.cpp` — 8-bit RGBA PNG output via libpng.
 
 ## Build, test, demo
 
 ```sh
 make            # builds build/libsubtitle_raster251.a, bin/demo, bin/selftest
 make test       # runs the selftest suite
-./bin/demo      # mixed-line layout + selection example
+./bin/demo      # mixed-line layout + selection + transparent PNG example
 ```
 
 Executables use `-Wl,-rpath,'$ORIGIN/../third_party/lib'`, so no

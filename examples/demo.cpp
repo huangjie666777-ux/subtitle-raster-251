@@ -9,6 +9,9 @@ using subtitle_raster251::BaseDirection;
 using subtitle_raster251::Engine;
 using subtitle_raster251::Error;
 using subtitle_raster251::Layout;
+using subtitle_raster251::RasterImage;
+using subtitle_raster251::RasterStyle;
+using subtitle_raster251::Rgba;
 using subtitle_raster251::SelectionRange;
 
 static void Dump(Engine& engine, const std::string& text,
@@ -76,5 +79,43 @@ int main() {
 
   // Combining mark cluster: "e" + U+0301.
   Dump(engine, "e\u0301clair", BaseDirection::kLtr);
+
+  // Rasterize a mixed Arabic/Latin subtitle line to a transparent
+  // RGBA PNG that can be composited straight onto video frames.
+  const std::string subtitle_text =
+      "Hello \u0645\u0631\u062D\u0628\u0627 \u05E9\u05DC\u05D5\u05DD!";
+  Layout raster_layout;
+  Error raster_err =
+      engine.LayoutLine(subtitle_text, 40.0, BaseDirection::kAuto,
+                        &raster_layout);
+  if (raster_err != Error::kOk) {
+    std::fprintf(stderr, "subtitle layout failed: %s\n",
+                 ErrorMessage(raster_err));
+    return 1;
+  }
+  RasterStyle style;
+  style.fill = Rgba{255, 255, 255, 255};
+  style.stroke = Rgba{20, 20, 20, 255};
+  style.stroke_radius = 2.5;
+  style.padding = 10;
+  RasterImage image;
+  raster_err = engine.RasterizeLine(raster_layout, 40.0, style, &image);
+  if (raster_err != Error::kOk) {
+    std::fprintf(stderr, "raster failed: %s\n",
+                 ErrorMessage(raster_err));
+    return 1;
+  }
+  const char* out_path = "build/demo_subtitle.png";
+  raster_err = Engine::SavePng(image, out_path);
+  if (raster_err != Error::kOk) {
+    std::fprintf(stderr, "png save failed: %s\n",
+                 ErrorMessage(raster_err));
+    return 1;
+  }
+  std::printf("\nsubtitle raster: %s\n", out_path);
+  std::printf("  canvas: %dx%d px, line width: %.2f px\n", image.width,
+              image.height, image.line_width);
+  std::printf("  canvas top-left relative to baseline origin: (%d, %d)\n",
+              image.origin_x, image.origin_y);
   return 0;
 }

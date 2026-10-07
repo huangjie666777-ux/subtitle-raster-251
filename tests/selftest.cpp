@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdio>
+#include <png.h>
 #include <string>
 #include <vector>
 
@@ -161,6 +162,172 @@ int main() {
         Error::kBadSelection);
   CHECK(engine.SelectionRanges(lay, 1, 2, &ranges) ==
         Error::kBadSelection);  // Mid-code-point (U+0301 is 2 bytes).
+
+  // ---- Rasterization ------------------------------------------------
+  RasterStyle style;
+  style.fill = Rgba{255, 255, 255, 255};
+  style.stroke = Rgba{0, 0, 0, 255};
+  style.stroke_radius = 2.0;
+  style.padding = 4;
+
+  // Basic Latin raster.
+  RasterImage img;
+  CHECK(LaysOut(&engine, "Hello", BaseDirection::kLtr, &lay));
+  CHECK(engine.RasterizeLine(lay, 20.0, style, &img) == Error::kOk);
+  CHECK(img.width > 0 && img.height > 0);
+  CHECK(img.pixels.size() ==
+        static_cast<size_t>(img.width) * img.height * 4);
+  CHECK(std::fabs(img.line_width - lay.width) < 1e-9);
+  // Canvas left/top edge is up-left of the baseline origin.
+  CHECK(img.origin_x <= 0 && img.origin_y < 0);
+  // Padding: glyph ink never touches the canvas border.
+  bool found_white = false, found_black = false, border_clean = true;
+  for (int y = 0; y < img.height; ++y) {
+    for (int x = 0; x < img.width; ++x) {
+      const uint8_t* p = &img.pixels[(y * img.width + x) * 4];
+      if (p[3] == 0) {
+        if (!(p[0] == 0 && p[1] == 0 && p[2] == 0)) border_clean = false;
+      } else if (p[0] > 200 && p[1] > 200 && p[2] > 200) {
+        found_white = true;
+      } else if (p[0] < 60 && p[1] < 60 && p[2] < 60) {
+        found_black = true;
+      }
+      bool border = x == 0 || y == 0 || x == img.width - 1 ||
+                    y == img.height - 1;
+      if (border && p[3] != 0) border_clean = false;
+    }
+  }
+  CHECK(found_white && found_black);  // Fill and outline colors.
+  CHECK(border_clean);
+
+  // No outline: no near-black pixels.
+  RasterStyle fill_only = style;
+  fill_only.stroke_radius = 0.0;
+  fill_only.padding = 0;
+  CHECK(engine.RasterizeLine(lay, 20.0, fill_only, &img) == Error::kOk);
+  found_black = false;
+  for (size_t i = 0; i < img.pixels.size(); i += 4) {
+    if (img.pixels[i + 3] != 0 && img.pixels[i] < 100 &&
+        img.pixels[i + 1] < 100 && img.pixels[i + 2] < 100) {
+      found_black = true;
+    }
+  }
+  CHECK(!found_black);
+
+  // Empty and whitespace-only lines produce no ink, keep line width.
+  CHECK(LaysOut(&engine, "", BaseDirection::kLtr, &lay));
+  CHECK(engine.RasterizeLine(lay, 20.0, style, &img) == Error::kNoInk);
+  CHECK(img.width == 0 && img.height == 0 && img.pixels.empty());
+  CHECK(std::fabs(img.line_width - lay.width) < 1e-9);
+  CHECK(LaysOut(&engine, "   ", BaseDirection::kLtr, &lay));
+  CHECK(engine.RasterizeLine(lay, 20.0, style, &img) == Error::kNoInk);
+  CHECK(img.width == 0 && std::fabs(img.line_width - lay.width) < 1e-9);
+
+  // Fully transparent colors produce no ink.
+  RasterStyle invisible = style;
+  invisible.fill.a = 0;
+  invisible.stroke.a = 0;
+  CHECK(LaysOut(&engine, "Hi", BaseDirection::kLtr, &lay));
+  CHECK(engine.RasterizeLine(lay, 20.0, invisible, &img) == Error::kNoInk);
+
+  // Parameter validation.
+  CHECK(engine.RasterizeLine(lay, 7.0, style, &img) == Error::kBadFontSize);
+  CHECK(engine.RasterizeLine(lay, 129.0, style, &img) ==
+        Error::kBadFontSize);
+  RasterStyle bad = style;
+  bad.stroke_radius = 9.0;
+  CHECK(engine.RasterizeLine(lay, 20.0, bad, &img) == Error::kBadStyle);
+  bad = style;
+  bad.stroke_radius = std::nan("");
+  CHECK(engine.RasterizeLine(lay, 20.0, bad, &img) == Error::kBadStyle);
+  bad = style;
+  bad.padding = 33;
+  CHECK(engine.RasterizeLine(lay, 20.0, bad, &img) == Error::kBadStyle);
+  bad = style;
+  bad.padding = -1;
+  CHECK(engine.RasterizeLine(lay, 20.0, bad, &img) == Error::kBadStyle);
+
+  // Size limits: 8..128 pixels and padding 0..32.
+  CHECK(engine.RasterizeLine(lay, 8.0, style, &img) == Error::kOk);
+  CHECK(engine.RasterizeLine(lay, 128.0, style, &img) == Error::kOk);
+
+  // 4,000,000 pixel cap: 4096 letters at 128 px vastly exceeds it.
+  std::string huge;
+  for (int i = 0; i < 4096; ++i) huge += 'm';
+  CHECK(engine.LayoutLine(huge, 128.0, BaseDirection::kLtr, &lay) ==
+        Error::kOk);
+  CHECK(engine.RasterizeLine(lay, 128.0, style, &img) ==
+        Error::kImageTooLarge);
+
+  // Mixed-direction line rasterizes with the shaped glyphs.
+  CHECK(LaysOut(&engine, mixed, BaseDirection::kAuto, &lay));
+  CHECK(engine.RasterizeLine(lay, 20.0, style, &img) == Error::kOk);
+  CHECK(img.width > 0);
+
+  // Combining mark is included: raster height with the mark exceeds
+  // that of the base letter alone.
+  RasterStyle no_pad = style;
+  no_pad.padding = 0;
+  no_pad.stroke_radius = 0.0;
+  RasterImage base_img, mark_img;
+  CHECK(LaysOut(&engine, "e", BaseDirection::kLtr, &lay));
+  CHECK(engine.RasterizeLine(lay, 32.0, no_pad, &base_img) == Error::kOk);
+  CHECK(LaysOut(&engine, accent, BaseDirection::kLtr, &lay));
+  CHECK(engine.RasterizeLine(lay, 32.0, no_pad, &mark_img) == Error::kOk);
+  CHECK(mark_img.height > base_img.height ||
+        mark_img.width > base_img.width);
+
+  // Subpixel placement: a 20.5 px size renders differently than 20 px.
+  RasterImage sp1, sp2;
+  CHECK(LaysOut(&engine, "ag", BaseDirection::kLtr, &lay));
+  CHECK(engine.RasterizeLine(lay, 20.0, fill_only, &sp1) == Error::kOk);
+  CHECK(engine.RasterizeLine(lay, 20.5, fill_only, &sp2) == Error::kOk);
+  bool pixels_differ = sp1.width != sp2.width || sp1.height != sp2.height;
+  if (!pixels_differ) {
+    for (size_t i = 0; i < sp1.pixels.size(); ++i) {
+      if (sp1.pixels[i] != sp2.pixels[i]) {
+        pixels_differ = true;
+        break;
+      }
+    }
+  }
+  CHECK(pixels_differ);
+
+  // PNG round trip preserves RGBA content byte-for-byte.
+  CHECK(LaysOut(&engine, "Hi", BaseDirection::kLtr, &lay));
+  CHECK(engine.RasterizeLine(lay, 24.0, style, &img) == Error::kOk);
+  const char* png_path = "build/selftest_raster.png";
+  CHECK(Engine::SavePng(img, png_path) == Error::kOk);
+  {
+    FILE* fp = std::fopen(png_path, "rb");
+    CHECK(fp != nullptr);
+    png_structp rp = png_create_read_struct(PNG_LIBPNG_VER_STRING,
+                                            nullptr, nullptr, nullptr);
+    png_infop ri = png_create_info_struct(rp);
+    png_init_io(rp, fp);
+    png_read_png(rp, ri, PNG_TRANSFORM_IDENTITY, nullptr);
+    CHECK(png_get_image_width(rp, ri) ==
+          static_cast<png_uint_32>(img.width));
+    CHECK(png_get_image_height(rp, ri) ==
+          static_cast<png_uint_32>(img.height));
+    CHECK(png_get_bit_depth(rp, ri) == 8);
+    CHECK(png_get_color_type(rp, ri) == PNG_COLOR_TYPE_RGBA);
+    png_bytep* rows = png_get_rows(rp, ri);
+    bool same = true;
+    for (int y = 0; y < img.height && same; ++y) {
+      for (int x = 0; x < img.width * 4; ++x) {
+        if (rows[y][x] != img.pixels[y * img.width * 4 + x]) {
+          same = false;
+          break;
+        }
+      }
+    }
+    CHECK(same);
+    png_destroy_read_struct(&rp, &ri, nullptr);
+    std::fclose(fp);
+    std::remove(png_path);
+  }
+  CHECK(Engine::SavePng(img, "/nonexistent-dir/x.png") == Error::kFileIo);
 
   if (failures == 0) {
     std::printf("all selftests passed\n");
