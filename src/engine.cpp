@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "subtitle_raster251/subtitle_raster251.h"
+#include "engine_impl.h"
 #include "segments.h"
 #include "utf8.h"
 
@@ -22,16 +23,14 @@ const char* ErrorMessage(Error error) {
     case Error::kBadFont: return "cannot load font";
     case Error::kBadFontSize: return "font size must be positive and finite";
     case Error::kBadSelection: return "invalid selection range";
+    case Error::kBadStrokeRadius:
+      return "stroke radius must be finite and within [0, 8] pixels";
+    case Error::kBadPadding: return "padding must be within [0, 32] pixels";
+    case Error::kImageTooLarge: return "raster canvas exceeds 4,000,000 pixels";
+    case Error::kIoError: return "cannot write output file";
   }
   return "unknown error";
 }
-
-struct Engine::Impl {
-  hb_blob_t* blob = nullptr;
-  hb_face_t* face = nullptr;
-  hb_font_t* font = nullptr;
-  Error error = Error::kOk;
-};
 
 Engine::Engine(const std::string& font_path) : impl_(new Impl) {
   impl_->blob = hb_blob_create_from_file(font_path.c_str());
@@ -48,9 +47,17 @@ Engine::Engine(const std::string& font_path) : impl_(new Impl) {
   }
   impl_->font = hb_font_create(impl_->face);
   hb_ot_font_set_funcs(impl_->font);
+
+  if (FT_Init_FreeType(&impl_->ft_library) != 0 ||
+      FT_New_Face(impl_->ft_library, font_path.c_str(), 0,
+                  &impl_->ft_face) != 0) {
+    impl_->error = Error::kBadFont;
+  }
 }
 
 Engine::~Engine() {
+  if (impl_->ft_face) FT_Done_Face(impl_->ft_face);
+  if (impl_->ft_library) FT_Done_FreeType(impl_->ft_library);
   if (impl_->font) hb_font_destroy(impl_->font);
   if (impl_->face) hb_face_destroy(impl_->face);
   if (impl_->blob) hb_blob_destroy(impl_->blob);

@@ -1,10 +1,10 @@
 CXX := g++
-CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Iinclude -Ithird_party/include/harfbuzz -Ithird_party/include/fribidi
-LDFLAGS := -Lthird_party/lib -lharfbuzz -lfribidi -Wl,-rpath,'$$ORIGIN/../third_party/lib'
+CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Iinclude -Ithird_party/include/harfbuzz -Ithird_party/include/fribidi -Ithird_party/include/freetype2 -Ithird_party/include/libpng16
+LDFLAGS := -Lthird_party/lib -lharfbuzz -lfribidi -lfreetype -lpng16 -lz -Wl,-rpath,'$$ORIGIN/../third_party/lib'
 
-LIB_OBJS := build/utf8.o build/segments.o build/engine.o build/selection.o
+LIB_OBJS := build/utf8.o build/segments.o build/engine.o build/selection.o build/raster.o
 
-all: bin/demo bin/selftest
+all: bin/demo bin/selftest bin/subtitle_png
 
 build/%.o: src/%.cpp | build
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -16,6 +16,9 @@ bin/demo: examples/demo.cpp build/libsubtitle_raster251.a | bin
 	$(CXX) $(CXXFLAGS) $< build/libsubtitle_raster251.a -o $@ $(LDFLAGS)
 
 bin/selftest: tests/selftest.cpp build/libsubtitle_raster251.a | bin
+	$(CXX) $(CXXFLAGS) $< build/libsubtitle_raster251.a -o $@ $(LDFLAGS)
+
+bin/subtitle_png: examples/subtitle_png.cpp build/libsubtitle_raster251.a | bin
 	$(CXX) $(CXXFLAGS) $< build/libsubtitle_raster251.a -o $@ $(LDFLAGS)
 
 build bin:

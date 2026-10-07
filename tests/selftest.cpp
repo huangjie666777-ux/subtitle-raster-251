@@ -162,6 +162,128 @@ int main() {
   CHECK(engine.SelectionRanges(lay, 1, 2, &ranges) ==
         Error::kBadSelection);  // Mid-code-point (U+0301 is 2 bytes).
 
+  // --- Rasterization ---
+  const Color white{255, 255, 255, 255};
+  const Color black{0, 0, 0, 255};
+  RasterImage img;
+
+  // Parameter validation.
+  CHECK(engine.RenderLine("a", 7.9, BaseDirection::kLtr, white, black, 0.0,
+                          0, &img) == Error::kBadFontSize);
+  CHECK(engine.RenderLine("a", 128.1, BaseDirection::kLtr, white, black,
+                          0.0, 0, &img) == Error::kBadFontSize);
+  CHECK(engine.RenderLine("a", 20.0, BaseDirection::kLtr, white, black,
+                          -1.0, 0, &img) == Error::kBadStrokeRadius);
+  CHECK(engine.RenderLine("a", 20.0, BaseDirection::kLtr, white, black,
+                          8.1, 0, &img) == Error::kBadStrokeRadius);
+  CHECK(engine.RenderLine("a", 20.0, BaseDirection::kLtr, white, black,
+                          0.0, 33, &img) == Error::kBadPadding);
+  CHECK(engine.RenderLine("a", 20.0, BaseDirection::kLtr, white, black,
+                          0.0, -1, &img) == Error::kBadPadding);
+  // Text validation is reused.
+  CHECK(engine.RenderLine("a\nb", 20.0, BaseDirection::kLtr, white, black,
+                          0.0, 0, &img) == Error::kNewline);
+
+  // Empty text: 0x0 image, zero line width.
+  CHECK(engine.RenderLine("", 20.0, BaseDirection::kLtr, white, black, 1.0,
+                          4, &img) == Error::kOk);
+  CHECK(img.width == 0 && img.height == 0 && img.pixels.empty());
+  CHECK(img.line_width == 0.0);
+
+  // Basic render: nonzero canvas, line width matches layout width.
+  CHECK(engine.RenderLine("Hello", 24.0, BaseDirection::kLtr, white, black,
+                          2.0, 4, &img) == Error::kOk);
+  CHECK(img.width > 0 && img.height > 0);
+  CHECK(engine.LayoutLine("Hello", 24.0, BaseDirection::kLtr, &lay) ==
+        Error::kOk);
+  CHECK(std::fabs(img.line_width - lay.width) < 1e-9);
+  CHECK(img.origin_x <= 0.0 + 6.0);  // Stroke + padding reach left.
+  CHECK(img.origin_y < 0.0);         // Ascenders above the baseline.
+  CHECK(img.pixels.size() ==
+        static_cast<size_t>(img.width) * img.height * 4);
+  // Zero-alpha pixels have zero RGB; some fully opaque fill exists.
+  bool saw_opaque = false;
+  for (size_t i = 0; i < img.pixels.size(); i += 4) {
+    if (img.pixels[i + 3] == 0) {
+      CHECK(img.pixels[i] == 0 && img.pixels[i + 1] == 0 &&
+            img.pixels[i + 2] == 0);
+    }
+    if (img.pixels[i + 3] == 255) saw_opaque = true;
+  }
+  CHECK(saw_opaque);
+
+  // Stroke extends the canvas beyond the fill-only canvas.
+  RasterImage fill_only;
+  CHECK(engine.RenderLine("Hello", 24.0, BaseDirection::kLtr, white, black,
+                          0.0, 0, &fill_only) == Error::kOk);
+  RasterImage stroked;
+  CHECK(engine.RenderLine("Hello", 24.0, BaseDirection::kLtr, white, black,
+                          3.0, 0, &stroked) == Error::kOk);
+  CHECK(stroked.width > fill_only.width);
+  CHECK(stroked.height > fill_only.height);
+  // Padding expands the canvas further, symmetrically.
+  RasterImage padded;
+  CHECK(engine.RenderLine("Hello", 24.0, BaseDirection::kLtr, white, black,
+                          0.0, 5, &padded) == Error::kOk);
+  CHECK(padded.width == fill_only.width + 10);
+  CHECK(padded.height == fill_only.height + 10);
+  CHECK(padded.origin_x == fill_only.origin_x - 5);
+  CHECK(padded.origin_y == fill_only.origin_y - 5);
+
+  // Stroke pixels exist outside the fill: with a black stroke and
+  // white fill, edge pixels between them are dark.
+  {
+    bool saw_dark_edge = false;
+    for (size_t i = 0; i < stroked.pixels.size(); i += 4) {
+      uint8_t a = stroked.pixels[i + 3];
+      if (a > 0 && stroked.pixels[i] < 64) saw_dark_edge = true;
+    }
+    CHECK(saw_dark_edge);
+  }
+
+  // Mixed-direction line renders and keeps the layout line width.
+  const std::string mixed_rtl =
+      "\u0645\u0631\u062D\u0628\u0627 \u05E9\u05DC\u05D5\u05DD Hi";
+  CHECK(engine.RenderLine(mixed_rtl, 28.0, BaseDirection::kAuto, white,
+                          black, 1.5, 2, &img) == Error::kOk);
+  CHECK(engine.LayoutLine(mixed_rtl, 28.0, BaseDirection::kAuto, &lay) ==
+        Error::kOk);
+  CHECK(std::fabs(img.line_width - lay.width) < 1e-9);
+
+  // Combining mark ink is not clipped: the canvas reaches above the
+  // mark-free canvas top by at least the mark's presence.
+  RasterImage with_mark, without_mark;
+  CHECK(engine.RenderLine("e\u0301", 32.0, BaseDirection::kLtr, white,
+                          black, 0.0, 0, &with_mark) == Error::kOk);
+  CHECK(engine.RenderLine("e", 32.0, BaseDirection::kLtr, white, black,
+                          0.0, 0, &without_mark) == Error::kOk);
+  CHECK(with_mark.origin_y <= without_mark.origin_y);
+
+  // Pixel limit: a long line at the maximum size exceeds 4M pixels.
+  {
+    std::string big(4000, 'W');
+    CHECK(engine.RenderLine(big, 128.0, BaseDirection::kLtr, white, black,
+                            0.0, 0, &img) == Error::kImageTooLarge);
+  }
+
+  // PNG round trip: file exists and starts with the PNG signature.
+  CHECK(engine.RenderLine("Hi", 20.0, BaseDirection::kLtr, white, black,
+                          1.0, 2, &img) == Error::kOk);
+  CHECK(Engine::SavePng(img, "build/selftest.png") == Error::kOk);
+  {
+    std::FILE* fp = std::fopen("build/selftest.png", "rb");
+    CHECK(fp != nullptr);
+    if (fp) {
+      unsigned char sig[8] = {0};
+      CHECK(std::fread(sig, 1, 8, fp) == 8);
+      CHECK(sig[0] == 0x89 && sig[1] == 'P' && sig[2] == 'N' &&
+            sig[3] == 'G');
+      std::fclose(fp);
+    }
+  }
+  CHECK(Engine::SavePng(img, "/nonexistent-dir/x.png") == Error::kIoError);
+
+
   if (failures == 0) {
     std::printf("all selftests passed\n");
     return 0;
